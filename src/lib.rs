@@ -37,27 +37,27 @@ impl Database {
       .fetch_one(&mut self.conn).await
   }
 
-  pub async fn tag_content(&mut self, content: &Content, name: &str) -> anyhow::Result<()> {
-    if !self.tag_exists(content, name).await? {
+  pub async fn tag_content(&mut self, content: &Content, tag: &str) -> anyhow::Result<()> {
+    if !self.tag_exists(content, tag).await? {
       self.increment_usn().await?;
       let next_usn = self.next_usn().await?;
-      println!("next usn {}", next_usn);
-      self.insert_tag(content, next_usn, name).await?;
+      println!("next usn {} for {}", next_usn, tag);
+      self.insert_tag(content, next_usn, tag).await?;
     }
     Ok(())
   }
 
-  async fn tag_exists(&mut self, content: &Content, name: &str) -> Result<bool, Error> {
+  async fn tag_exists(&mut self, content: &Content, tag: &str) -> Result<bool, Error> {
     let exists = r#"
       SELECT EXISTS(SELECT * FROM djmdSongMyTag AS st, djmdMyTag as t WHERE st.MyTagID = t.ID AND t.Name = ? AND ContentID = ?)
   "#;
     sqlx::query_scalar(exists)
-      .bind(name)
+      .bind(tag)
       .bind(&content.ID)
       .fetch_one(&mut self.conn).await
   }
 
-  async fn insert_tag(&mut self, content: &Content, next_usn: i64, name: &str) -> Result<SqliteQueryResult, Error> {
+  async fn insert_tag(&mut self, content: &Content, next_usn: i64, tag: &str) -> Result<SqliteQueryResult, Error> {
     let insert = r#"
       WITH
         tag AS (SELECT ID, ParentID FROM djmdMyTag WHERE name = ?)
@@ -66,7 +66,7 @@ impl Database {
         FROM tag
   "#;
     sqlx::query(insert)
-      .bind(name)
+      .bind(tag)
       .bind(Uuid::new_v4().to_string())
       .bind(&content.ID)
       .bind(Uuid::new_v4().to_string())
