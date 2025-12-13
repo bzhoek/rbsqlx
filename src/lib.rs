@@ -2,8 +2,8 @@
 use std::env;
 use std::str::FromStr;
 use dotenvy::dotenv;
-use sqlx::sqlite::SqliteConnectOptions;
-use sqlx::{ConnectOptions, Row, SqliteConnection};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteQueryResult};
+use sqlx::{ConnectOptions, Error, Row, SqliteConnection};
 use uuid::Uuid;
 
 #[derive(Debug, sqlx::FromRow)]
@@ -31,11 +31,10 @@ impl Database {
     Ok(Self { conn })
   }
 
-  pub async fn content(&mut self, id: &str) -> anyhow::Result<Content> {
-    let content = sqlx::query_as::<_, Content>("SELECT * FROM djmdContent WHERE FileNameL like ?")
+  pub async fn content(&mut self, id: &str) -> Result<Content, Error> {
+    sqlx::query_as::<_, Content>("SELECT * FROM djmdContent WHERE FileNameL like ?")
       .bind(format!("%[{}]%", id))
-      .fetch_one(&mut self.conn).await?;
-    Ok(content)
+      .fetch_one(&mut self.conn).await
   }
 
   pub async fn tag_content(&mut self, content: &Content, name: &str) -> anyhow::Result<()> {
@@ -44,23 +43,21 @@ impl Database {
       let next_usn = self.next_usn().await?;
       println!("next usn {}", next_usn);
       self.insert_tag(content, next_usn, name).await?;
-
     }
     Ok(())
   }
 
-  async fn tag_exists(&mut self, content: &Content, name: &str) -> anyhow::Result<bool> {
+  async fn tag_exists(&mut self, content: &Content, name: &str) -> Result<bool, Error> {
     let exists = r#"
       SELECT EXISTS(SELECT * FROM djmdSongMyTag AS st, djmdMyTag as t WHERE st.MyTagID = t.ID AND t.Name = ? AND ContentID = ?)
   "#;
-    let exists: bool = sqlx::query_scalar(exists)
+    sqlx::query_scalar(exists)
       .bind(name)
       .bind(&content.ID)
-      .fetch_one(&mut self.conn).await?;
-    Ok(exists)
+      .fetch_one(&mut self.conn).await
   }
 
-  async fn insert_tag(&mut self, content: &Content, next_usn: i64, name: &str) -> anyhow::Result<()> {
+  async fn insert_tag(&mut self, content: &Content, next_usn: i64, name: &str) -> Result<SqliteQueryResult, Error> {
     let insert = r#"
       WITH
         tag AS (SELECT ID, ParentID FROM djmdMyTag WHERE name = ?)
@@ -74,20 +71,17 @@ impl Database {
       .bind(&content.ID)
       .bind(Uuid::new_v4().to_string())
       .bind(next_usn)
-      .execute(&mut self.conn).await?;
-    Ok(())
+      .execute(&mut self.conn).await
   }
 
-  async fn increment_usn(&mut self) -> anyhow::Result<()> {
+  async fn increment_usn(&mut self) -> Result<SqliteQueryResult, Error> {
     sqlx::query("UPDATE agentRegistry SET int_1 = int_1 + 1 WHERE registry_id = 'localUpdateCount'")
-      .execute(&mut self.conn).await?;
-    Ok(())
+      .execute(&mut self.conn).await
   }
-  async fn next_usn(&mut self) -> anyhow::Result<i64> {
+  async fn next_usn(&mut self) -> Result<i64, Error> {
     let usn = sqlx::query("SELECT int_1 from agentRegistry WHERE registry_id = 'localUpdateCount'")
       .fetch_one(&mut self.conn).await?;
-    let next_usn: i64 = usn.try_get("int_1")?;
-    Ok(next_usn)
+    usn.try_get("int_1")
   }
 
 }
