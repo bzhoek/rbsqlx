@@ -19,13 +19,13 @@ pub struct Database {
 }
 
 impl Database {
-  pub async fn connect() -> anyhow::Result<Self> {
+  pub async fn connect(url: &str) -> anyhow::Result<Self> {
     dotenv().ok();
     let key = format!("'{}'", env::var("SQLCIPHER_KEY") // key must be SQL 'quoted'
       .expect("SQLCIPHER_KEY must be set"));
 
     let conn =
-      SqliteConnectOptions::from_str("encrypted.db")?
+      SqliteConnectOptions::from_str(url)?
         .pragma("key", key)
         .connect().await?;
     Ok(Self { conn })
