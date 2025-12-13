@@ -23,7 +23,7 @@ impl Database {
     dotenv().ok();
 
     let pool: SqlitePool = SqlitePoolOptions::new()
-      .max_connections(5)
+      .max_connections(6)
       .after_connect(|conn, _meta| {
         let pragma = format!("PRAGMA key = '{}';", env::var("SQLCIPHER_KEY") // key must be SQL 'quoted'
           .expect("SQLCIPHER_KEY must be set"));
@@ -44,6 +44,13 @@ impl Database {
     sqlx::query_as::<_, Content>("SELECT * FROM djmdContent WHERE FileNameL like ?")
       .bind(format!("%[{}]%", id))
       .fetch_one(&self.pool).await
+  }
+
+  pub async fn rate_content(&mut self, content: &Content, rating: u8) -> Result<SqliteQueryResult, Error> {
+    sqlx::query("UPDATE djmdContent SET Rating = ? WHERE ID = ?")
+      .bind(rating)
+      .bind(&content.ID)
+      .execute(&self.pool).await
   }
 
   pub async fn tag_content(&mut self, content: &Content, tag: &str) -> anyhow::Result<()> {
