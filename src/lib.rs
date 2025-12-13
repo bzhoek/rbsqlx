@@ -1,9 +1,8 @@
 #![allow(non_snake_case)]
-use std::env;
-use std::str::FromStr;
 use dotenvy::dotenv;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteQueryResult};
-use sqlx::{ConnectOptions, Error, Row, SqliteConnection};
+use sqlx::sqlite::{SqlitePoolOptions, SqliteQueryResult};
+use sqlx::{Error, Row, SqlitePool};
+use std::env;
 use uuid::Uuid;
 
 #[derive(Debug, sqlx::FromRow)]
@@ -11,30 +10,40 @@ use uuid::Uuid;
 pub struct Content {
   ID: String,
   FileNameL: String,
-  Rating: i64,
+  pub Rating: i64,
 }
 
+#[derive(Clone)]
 pub struct Database {
-  conn: SqliteConnection,
+  pool: SqlitePool,
 }
 
 impl Database {
   pub async fn connect(url: &str) -> anyhow::Result<Self> {
     dotenv().ok();
-    let key = format!("'{}'", env::var("SQLCIPHER_KEY") // key must be SQL 'quoted'
-      .expect("SQLCIPHER_KEY must be set"));
 
-    let conn =
-      SqliteConnectOptions::from_str(url)?
-        .pragma("key", key)
-        .connect().await?;
-    Ok(Self { conn })
+    let pool: SqlitePool = SqlitePoolOptions::new()
+      .max_connections(5)
+      .after_connect(|conn, _meta| {
+        let pragma = format!("PRAGMA key = '{}';", env::var("SQLCIPHER_KEY") // key must be SQL 'quoted'
+          .expect("SQLCIPHER_KEY must be set"));
+        Box::pin(async move {
+          sqlx::query(&pragma)
+            .execute(conn)
+            .await?;
+          Ok(())
+        })
+      })
+      .connect(url)
+      .await?;
+
+    Ok(Self { pool })
   }
 
   pub async fn content(&mut self, id: &str) -> Result<Content, Error> {
     sqlx::query_as::<_, Content>("SELECT * FROM djmdContent WHERE FileNameL like ?")
       .bind(format!("%[{}]%", id))
-      .fetch_one(&mut self.conn).await
+      .fetch_one(&self.pool).await
   }
 
   pub async fn tag_content(&mut self, content: &Content, tag: &str) -> anyhow::Result<()> {
@@ -54,7 +63,7 @@ impl Database {
     sqlx::query_scalar(exists)
       .bind(tag)
       .bind(&content.ID)
-      .fetch_one(&mut self.conn).await
+      .fetch_one(&self.pool).await
   }
 
   async fn insert_tag(&mut self, content: &Content, next_usn: i64, tag: &str) -> Result<SqliteQueryResult, Error> {
@@ -71,17 +80,16 @@ impl Database {
       .bind(&content.ID)
       .bind(Uuid::new_v4().to_string())
       .bind(next_usn)
-      .execute(&mut self.conn).await
+      .execute(&self.pool).await
   }
 
   async fn increment_usn(&mut self) -> Result<SqliteQueryResult, Error> {
     sqlx::query("UPDATE agentRegistry SET int_1 = int_1 + 1 WHERE registry_id = 'localUpdateCount'")
-      .execute(&mut self.conn).await
+      .execute(&self.pool).await
   }
   async fn next_usn(&mut self) -> Result<i64, Error> {
     let usn = sqlx::query("SELECT int_1 from agentRegistry WHERE registry_id = 'localUpdateCount'")
-      .fetch_one(&mut self.conn).await?;
+      .fetch_one(&self.pool).await?;
     usn.try_get("int_1")
   }
-
 }
