@@ -13,6 +13,13 @@ pub struct Content {
   pub Rating: i64,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+#[allow(unused)]
+pub struct Tag {
+  ID: String,
+  Name: String,
+}
+
 #[derive(Clone)]
 pub struct Database {
   pool: SqlitePool,
@@ -46,6 +53,15 @@ impl Database {
       .fetch_one(&self.pool).await
   }
 
+  pub async fn content_tags(&mut self, content: &Content) -> Result<Vec<Tag>, Error> {
+    let query = r#"
+      SELECT st.ID, t.name FROM djmdSongMyTag AS st, djmdMyTag as t WHERE st.MyTagID = t.ID AND ContentID = ? ORDER by t.name
+    "#;
+    sqlx::query_as::<_, Tag>(query)
+      .bind(content.ID.clone())
+      .fetch_all(&self.pool).await
+  }
+
   pub async fn rate_content(&mut self, content: &Content, rating: u8) -> Result<SqliteQueryResult, Error> {
     sqlx::query("UPDATE djmdContent SET Rating = ? WHERE ID = ?")
       .bind(rating)
@@ -57,7 +73,7 @@ impl Database {
     if !self.tag_exists(content, tag).await? {
       self.increment_usn().await?;
       let next_usn = self.next_usn().await?;
-      println!("next usn {} for {}", next_usn, tag);
+      println!("{} for {:?} usn {}", tag, content, next_usn);
       self.insert_tag(content, next_usn, tag).await?;
     }
     Ok(())
@@ -94,9 +110,27 @@ impl Database {
     sqlx::query("UPDATE agentRegistry SET int_1 = int_1 + 1 WHERE registry_id = 'localUpdateCount'")
       .execute(&self.pool).await
   }
+
   async fn next_usn(&mut self) -> Result<i64, Error> {
     let usn = sqlx::query("SELECT int_1 from agentRegistry WHERE registry_id = 'localUpdateCount'")
       .fetch_one(&self.pool).await?;
     usn.try_get("int_1")
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn test_content_tags() {
+    let mut database = Database::connect("encrypted.db").await.unwrap();
+    let content = database.content("918205852").await.unwrap();
+    assert_eq!(content.ID, "43970339");
+    let tags = database.content_tags(&content).await.unwrap();
+    let names = tags.iter().map(|t| t.Name.as_str()).collect::<Vec<&str>>();
+    assert_eq!(vec!["eatmos", "ebang", "ebdown", "ebup", "edrive", "epeak"], names);
+  }
+}
+
+
