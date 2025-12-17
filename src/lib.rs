@@ -79,6 +79,23 @@ impl Database {
     Ok(())
   }
 
+  pub async fn untag_content(&mut self, content: &Content, tag: &str) -> Result<SqliteQueryResult, Error> {
+    let sql = r#"
+      DELETE FROM djmdSongMyTag
+      WHERE ID IN (
+        SELECT st.ID
+        FROM djmdSongMyTag AS st
+        JOIN djmdMyTag AS t ON st.MyTagID = t.ID
+        WHERE st.ContentID = ?
+          AND t.name = ?
+      );
+      "#;
+    sqlx::query(sql)
+      .bind(&content.ID)
+      .bind(tag)
+      .execute(&self.pool).await
+  }
+
   async fn tag_exists(&mut self, content: &Content, tag: &str) -> Result<bool, Error> {
     let exists = r#"
       SELECT EXISTS(SELECT * FROM djmdSongMyTag AS st, djmdMyTag as t WHERE st.MyTagID = t.ID AND t.Name = ? AND ContentID = ?)
@@ -127,6 +144,10 @@ mod tests {
     let mut database = Database::connect("encrypted.db").await.unwrap();
     let content = database.content("918205852").await.unwrap();
     assert_eq!(content.ID, "43970339");
+    let tags = database.content_tags(&content).await.unwrap();
+    let names = tags.iter().map(|t| t.Name.as_str()).collect::<Vec<&str>>();
+    assert_eq!(vec!["eatmos", "ebang", "ebdown", "ebup", "edrive", "epeak"], names);
+    database.untag_content(&content, "eatmos").await.unwrap();
     let tags = database.content_tags(&content).await.unwrap();
     let names = tags.iter().map(|t| t.Name.as_str()).collect::<Vec<&str>>();
     assert_eq!(vec!["eatmos", "ebang", "ebdown", "ebup", "edrive", "epeak"], names);
