@@ -54,10 +54,10 @@ impl Database {
   }
 
   pub async fn content_tags(&mut self, content: &Content) -> Result<Vec<Tag>, Error> {
-    let query = r#"
+    let sql = r#"
       SELECT st.ID, t.name FROM djmdSongMyTag AS st, djmdMyTag as t WHERE st.MyTagID = t.ID AND ContentID = ? ORDER by t.name
     "#;
-    sqlx::query_as::<_, Tag>(query)
+    sqlx::query_as::<_, Tag>(sql)
       .bind(content.ID.clone())
       .fetch_all(&self.pool).await
   }
@@ -71,7 +71,6 @@ impl Database {
 
   pub async fn tag_content(&mut self, content: &Content, tag: &str) -> anyhow::Result<()> {
     if !self.tag_exists(content, tag).await? {
-      self.increment_usn().await?;
       let next_usn = self.next_usn().await?;
       println!("{} for {:?} usn {}", tag, content, next_usn);
       self.insert_tag(content, next_usn, tag).await?;
@@ -123,13 +122,16 @@ impl Database {
       .execute(&self.pool).await
   }
 
-  async fn increment_usn(&mut self) -> Result<SqliteQueryResult, Error> {
-    sqlx::query("UPDATE agentRegistry SET int_1 = int_1 + 1 WHERE registry_id = 'localUpdateCount'")
-      .execute(&self.pool).await
-  }
-
   async fn next_usn(&mut self) -> Result<i64, Error> {
-    let usn = sqlx::query("SELECT int_1 from agentRegistry WHERE registry_id = 'localUpdateCount'")
+    let sql = r#"
+      BEGIN TRANSACTION;
+      UPDATE agentRegistry
+      SET int_1 = int_1 + 1
+      WHERE registry_id = 'localUpdateCount'
+      RETURNING int_1;
+      COMMIT;
+    "#;
+    let usn = sqlx::query(sql)
       .fetch_one(&self.pool).await?;
     usn.try_get("int_1")
   }
