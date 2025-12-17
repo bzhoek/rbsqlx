@@ -1029,6 +1029,7 @@ dependencies = [
  "libsqlite3-sys",
  "sqlx",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

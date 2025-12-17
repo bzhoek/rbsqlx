@@ -3,6 +3,8 @@ use dotenvy::dotenv;
 use sqlx::sqlite::{SqlitePoolOptions, SqliteQueryResult};
 use sqlx::{Error, Row, SqlitePool};
 use std::env;
+use std::time::Duration;
+use tracing::debug;
 use uuid::Uuid;
 
 #[derive(Debug, sqlx::FromRow)]
@@ -17,7 +19,7 @@ pub struct Content {
 #[allow(unused)]
 pub struct Tag {
   ID: String,
-  Name: String,
+  pub Name: String,
 }
 
 #[derive(Clone)]
@@ -31,6 +33,7 @@ impl Database {
 
     let pool: SqlitePool = SqlitePoolOptions::new()
       .max_connections(6)
+      .acquire_slow_threshold(Duration::from_secs(5))
       .after_connect(|conn, _meta| {
         let pragma = format!("PRAGMA key = '{}';", env::var("SQLCIPHER_KEY") // key must be SQL 'quoted'
           .expect("SQLCIPHER_KEY must be set"));
@@ -69,13 +72,14 @@ impl Database {
       .execute(&self.pool).await
   }
 
-  pub async fn tag_content(&mut self, content: &Content, tag: &str) -> anyhow::Result<()> {
+  pub async fn tag_content(&mut self, content: &Content, tag: &str) -> anyhow::Result<Option<i64>> {
     if !self.tag_exists(content, tag).await? {
       let next_usn = self.next_usn().await?;
-      println!("{} for {:?} usn {}", tag, content, next_usn);
+      debug!("{} for {:?} usn {}", tag, content, next_usn);
       self.insert_tag(content, next_usn, tag).await?;
+      return Ok(Some(next_usn))
     }
-    Ok(())
+    Ok(None)
   }
 
   pub async fn untag_content(&mut self, content: &Content, tag: &str) -> Result<SqliteQueryResult, Error> {
@@ -124,12 +128,10 @@ impl Database {
 
   async fn next_usn(&mut self) -> Result<i64, Error> {
     let sql = r#"
-      BEGIN TRANSACTION;
       UPDATE agentRegistry
       SET int_1 = int_1 + 1
       WHERE registry_id = 'localUpdateCount'
       RETURNING int_1;
-      COMMIT;
     "#;
     let usn = sqlx::query(sql)
       .fetch_one(&self.pool).await?;
