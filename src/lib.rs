@@ -50,6 +50,12 @@ impl Database {
     Ok(Self { pool })
   }
 
+  pub async fn filepath(&mut self, path: &str) -> Result<Content, Error> {
+    sqlx::query_as::<_, Content>("SELECT * FROM djmdContent WHERE FolderPath like ?")
+      .bind(format!("%{}", path))
+      .fetch_one(&self.pool).await
+  }
+
   pub async fn content(&mut self, id: &str) -> Result<Content, Error> {
     sqlx::query_as::<_, Content>("SELECT * FROM djmdContent WHERE FileNameL like ?")
       .bind(format!("%[{}]%", id))
