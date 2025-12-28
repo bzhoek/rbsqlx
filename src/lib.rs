@@ -10,8 +10,8 @@ use uuid::Uuid;
 #[derive(Debug, sqlx::FromRow)]
 #[allow(unused)]
 pub struct Content {
-  ID: String,
-  FileNameL: String,
+  pub ID: String,
+  pub FileNameL: String,
   pub Rating: i64,
 }
 
@@ -33,7 +33,7 @@ impl Database {
 
     let pool: SqlitePool = SqlitePoolOptions::new()
       .max_connections(6)
-      .acquire_slow_threshold(Duration::from_secs(5))
+      .acquire_slow_threshold(Duration::from_secs(12))
       .after_connect(|conn, _meta| {
         let pragma = format!("PRAGMA key = '{}';", env::var("SQLCIPHER_KEY") // key must be SQL 'quoted'
           .expect("SQLCIPHER_KEY must be set"));
@@ -99,7 +99,7 @@ impl Database {
       .execute(&self.pool).await
   }
 
-  async fn tag_exists(&mut self, content: &Content, tag: &str) -> Result<bool, Error> {
+  async fn tag_exists(&self, content: &Content, tag: &str) -> Result<bool, Error> {
     let exists = r#"
       SELECT EXISTS(SELECT * FROM djmdSongMyTag AS st, djmdMyTag as t WHERE st.MyTagID = t.ID AND t.Name = ? AND ContentID = ?)
   "#;
@@ -109,7 +109,7 @@ impl Database {
       .fetch_one(&self.pool).await
   }
 
-  async fn insert_tag(&mut self, content: &Content, next_usn: i64, tag: &str) -> Result<SqliteQueryResult, Error> {
+  async fn insert_tag(&self, content: &Content, next_usn: i64, tag: &str) -> Result<SqliteQueryResult, Error> {
     let insert = r#"
       WITH
         tag AS (SELECT ID, ParentID FROM djmdMyTag WHERE name = ?)
@@ -126,7 +126,7 @@ impl Database {
       .execute(&self.pool).await
   }
 
-  async fn next_usn(&mut self) -> Result<i64, Error> {
+  async fn next_usn(&self) -> Result<i64, Error> {
     let sql = r#"
       UPDATE agentRegistry
       SET int_1 = int_1 + 1
@@ -137,11 +137,25 @@ impl Database {
       .fetch_one(&self.pool).await?;
     usn.try_get("int_1")
   }
+
+  pub async fn checkpoint(&self) -> anyhow::Result<()> {
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE);")
+      .execute(&self.pool)
+      .await?;
+    Ok(())
+  }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn test_find_content() {
+    let mut database = Database::connect("encrypted.db").await.unwrap();
+    let content = database.content("918205852").await.unwrap();
+    assert_eq!(content.ID, "43970339");
+  }
 
   #[tokio::test]
   async fn test_content_tags() {
@@ -156,6 +170,22 @@ mod tests {
     let names = tags.iter().map(|t| t.Name.as_str()).collect::<Vec<&str>>();
     assert_eq!(vec!["eatmos", "ebang", "ebdown", "ebup", "edrive", "epeak"], names);
   }
+
+  #[tokio::test]
+  async fn test_tag_untag() {
+    let mut database = Database::connect("encrypted.db").await.unwrap();
+    let content = database.content("918205852").await.unwrap();
+    assert_eq!(content.ID, "43970339");
+    let tags = database.content_tags(&content).await.unwrap();
+    let names = tags.iter().map(|t| t.Name.as_str()).collect::<Vec<&str>>();
+    assert_eq!(vec!["ebup"], names);
+    database.tag_content(&content, "eatmos").await.unwrap();
+    let tags = database.content_tags(&content).await.unwrap();
+    let names = tags.iter().map(|t| t.Name.as_str()).collect::<Vec<&str>>();
+    assert_eq!(vec!["eatmos", "ebup"], names);
+    database.untag_content(&content, "eatmos").await.unwrap();
+    let tags = database.content_tags(&content).await.unwrap();
+    let names = tags.iter().map(|t| t.Name.as_str()).collect::<Vec<&str>>();
+    assert_eq!(vec!["ebup"], names);
+  }
 }
-
-
