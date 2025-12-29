@@ -4,6 +4,7 @@ use sqlx::sqlite::{SqlitePoolOptions, SqliteQueryResult};
 use sqlx::{Error, Row, SqlitePool};
 use std::env;
 use std::time::Duration;
+use sqlx::types::chrono::Utc;
 use tracing::debug;
 use uuid::Uuid;
 
@@ -64,7 +65,8 @@ impl Database {
 
   pub async fn content_tags(&mut self, content: &Content) -> Result<Vec<Tag>, Error> {
     let sql = r#"
-      SELECT st.ID, t.name FROM djmdSongMyTag AS st, djmdMyTag as t WHERE st.MyTagID = t.ID AND ContentID = ? ORDER by t.name
+      SELECT st.ID, t.name FROM djmdSongMyTag AS st, djmdMyTag as t
+      WHERE st.MyTagID = t.ID AND ContentID = ? ORDER by t.name
     "#;
     sqlx::query_as::<_, Tag>(sql)
       .bind(content.ID.clone())
@@ -83,7 +85,7 @@ impl Database {
       let next_usn = self.next_usn().await?;
       debug!("{} for {:?} usn {}", tag, content, next_usn);
       self.insert_tag(content, next_usn, tag).await?;
-      return Ok(Some(next_usn))
+      return Ok(Some(next_usn));
     }
     Ok(None)
   }
@@ -107,7 +109,9 @@ impl Database {
 
   async fn tag_exists(&self, content: &Content, tag: &str) -> Result<bool, Error> {
     let exists = r#"
-      SELECT EXISTS(SELECT * FROM djmdSongMyTag AS st, djmdMyTag as t WHERE st.MyTagID = t.ID AND t.Name = ? AND ContentID = ?)
+      SELECT EXISTS (
+        SELECT * FROM djmdSongMyTag AS st, djmdMyTag as t
+        WHERE st.MyTagID = t.ID AND t.Name = ? AND ContentID = ?)
   "#;
     sqlx::query_scalar(exists)
       .bind(tag)
@@ -144,6 +148,28 @@ impl Database {
     usn.try_get("int_1")
   }
 
+  async fn next_id(&self, table: &str) -> anyhow::Result<u32> {
+    let sql = format!("SELECT COUNT(*) FROM {} WHERE ID = ?", table);
+    let mut buf = [0u8; 4];
+    loop {
+      getrandom::getrandom(&mut buf).unwrap();
+      let id: u32 = ((buf[0] as u32) << 24) + ((buf[1] as u32) << 16) + ((buf[2] as u32) << 8) + buf[3] as u32;
+      if id < 100 { continue; }
+      let (count, ): (i32,) = sqlx::query_as(&sql)
+        .bind(id)
+        .fetch_one(&self.pool).await?;
+      if count == 0 {
+        return Ok(id);
+      }
+    }
+  }
+
+  fn now_timestamp() -> String {
+    let now_utc = Utc::now();
+    let formatted_utc = now_utc.format("%Y-%m-%d %H:%M:%S%.3f %:z").to_string();
+    formatted_utc
+  }
+
   pub async fn checkpoint(&self) -> anyhow::Result<()> {
     sqlx::query("PRAGMA wal_checkpoint(TRUNCATE);")
       .execute(&self.pool)
@@ -152,6 +178,57 @@ impl Database {
   }
 }
 
+impl Database {
+
+  pub async fn playlist_create(&self, name: &str) -> anyhow::Result<()> {
+    let next_id = self.next_id("djmdPlaylist").await?;
+    let next_usn = self.next_usn().await?;
+    let timestamp = Self::now_timestamp();
+    let sql = r#"
+      INSERT INTO djmdPlaylist (Seq, ID, Name, Attribute, ParentID, UUID, rb_local_usn, created_at, updated_at)
+      SELECT
+        (SELECT MAX(Seq) + 1 FROM djmdPlaylist WHERE ParentID = 'root'),
+        ?, ?, 0, 'root', ?, ?, ?, ?
+      WHERE NOT EXISTS(SELECT ID FROM djmdPlaylist WHERE Name = ?);
+      "#;
+    sqlx::query(sql)
+      .bind(next_id)
+      .bind(name)
+      .bind(Uuid::new_v4().to_string())
+      .bind(next_usn)
+      .bind(&timestamp)
+      .bind(&timestamp)
+      .bind(name)
+      .execute(&self.pool).await?;
+    Ok(())
+  }
+
+  pub async fn playlist_add(&self, playlist: &str, content: &Content) -> anyhow::Result<()> {
+    let sql = r#"
+      INSERT INTO djmdSongPlaylist (ID, PlaylistID, ContentID, UUID, created_at, updated_at, rb_local_usn, TrackNo)
+      SELECT ?, pl.ID, c.ID, ?, ?, ?, ?,
+        row_number() OVER (ORDER BY c.created_at) +
+          COALESCE((SELECT MAX(TrackNo) FROM djmdSongPlaylist WHERE PlaylistID = pl.ID), 0)
+      FROM djmdContent AS c, djmdPlaylist AS pl
+      WHERE c.ID = ?
+        AND pl.Name = ?
+        AND NOT EXISTS(SELECT ContentID FROM djmdSongPlaylist WHERE PlaylistID = pl.ID AND ContentID = c.ID)
+      ORDER BY c.rating desc, c.created_at DESC
+      "#;
+    let next_usn = self.next_usn().await?;
+    let timestamp = Self::now_timestamp();
+    sqlx::query(sql)
+      .bind(Uuid::new_v4().to_string())
+      .bind(Uuid::new_v4().to_string())
+      .bind(&timestamp)
+      .bind(&timestamp)
+      .bind(next_usn)
+      .bind(&content.ID)
+      .bind(playlist)
+      .execute(&self.pool).await?;
+    Ok(())
+  }
+}
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -161,6 +238,22 @@ mod tests {
     let mut database = Database::connect("encrypted.db").await.unwrap();
     let content = database.content("918205852").await.unwrap();
     assert_eq!(content.ID, "43970339");
+  }
+
+  #[tokio::test]
+  async fn test_playlist_create() {
+    let mut database = Database::connect("encrypted.db").await.unwrap();
+    let content = database.content("918205852").await.unwrap();
+    database.playlist_create("2026").await.unwrap();
+    database.checkpoint().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn test_playlist_add() {
+    let mut database = Database::connect("encrypted.db").await.unwrap();
+    let content = database.content("918205852").await.unwrap();
+    database.playlist_add("Oefenen", &content).await.unwrap();
+    database.checkpoint().await.unwrap();
   }
 
   #[tokio::test]

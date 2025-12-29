@@ -1026,6 +1026,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dotenvy",
+ "getrandom 0.2.16",
  "libsqlite3-sys",
  "sqlx",
  "tokio",
