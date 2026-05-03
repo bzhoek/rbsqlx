@@ -76,7 +76,7 @@ impl Database {
       .fetch_one(&self.pool).await
   }
 
-  pub async fn playlist_sub(&self, name: &str, parent: &Playlist) -> Result<Playlist, Error> {
+  pub async fn playlist(&self, name: &str, parent: &Playlist) -> Result<Playlist, Error> {
     sqlx::query_as::<_, Playlist>("SELECT * FROM djmdPlaylist WHERE Name = ? AND ParentID = ?")
       .bind(name)
       .bind(&parent.ID)
@@ -222,28 +222,38 @@ impl Database {
   }
 
   pub async fn playlist_create(&self, name: &str, parent: &Playlist) -> anyhow::Result<Playlist> {
+    if let Ok(playlist) = self.playlist(name, parent).await {
+      return Ok(playlist);
+    }
+    
+    let mut tx = self.pool.begin().await?;
+
     let next_id = self.next_id("djmdPlaylist").await?;
     let next_usn = self.next_usn().await?;
     let timestamp = Self::now_timestamp();
+    let uuid = Uuid::new_v4().to_string();
+
     let sql = r#"
-      INSERT INTO djmdPlaylist (Seq, ID, Name, Attribute, ParentID, UUID, rb_local_usn, created_at, updated_at)
-      SELECT
-        (SELECT MAX(Seq) + 1 FROM djmdPlaylist WHERE ParentID = ?),
-        ?, ?, 0, ?, ?, ?, ?, ?
-      WHERE NOT EXISTS(SELECT ID FROM djmdPlaylist WHERE Name = ?);
-      "#;
-    sqlx::query(sql)
+        INSERT INTO djmdPlaylist (Seq, ID, Name, Attribute, ParentID, UUID, rb_local_usn, created_at, updated_at)
+        VALUES (
+            (SELECT COALESCE(MAX(Seq), 0) + 1 FROM djmdPlaylist WHERE ParentID = $1),
+            $2, $3, 0, $1, $4, $5, $6, $6
+        )
+        RETURNING *; 
+    "#;
+
+    let playlist = sqlx::query_as::<_, Playlist>(sql)
       .bind(&parent.ID)
       .bind(next_id)
       .bind(name)
-      .bind(&parent.ID)
-      .bind(Uuid::new_v4().to_string())
+      .bind(uuid)
       .bind(next_usn)
       .bind(&timestamp)
-      .bind(&timestamp)
-      .bind(name)
-      .execute(&self.pool).await?;
-    Ok(self.playlist_sub(name, parent).await?)
+      .fetch_one(&mut *tx)
+      .await?;
+
+    tx.commit().await?;
+    Ok(playlist)
   }
 
   pub async fn playlist_top_add(&self, playlist: &str, content: &Content) -> anyhow::Result<()> {
@@ -288,7 +298,7 @@ mod tests {
     let (database, content) = database_content().await;
     let parent = database.playlist_top("recent").await.unwrap();
     assert_eq!(parent.ID, "3564193569");
-    let playlist = database.playlist_sub("recent-2404", &parent).await.unwrap();
+    let playlist = database.playlist("recent-2404", &parent).await.unwrap();
     assert_eq!(playlist.ID, "2334865703");
     database.playlist_add(&playlist, &content).await.unwrap();
     database.checkpoint().await.unwrap();
@@ -327,7 +337,7 @@ mod tests {
     let (database, content) = database_content().await;
     let parent = database.playlist_top("recent").await.unwrap();
     let playlist = database.playlist_create("2026-04", &parent).await.unwrap();
-    assert_eq!(playlist.ID, "2832414736");
+    assert_eq!(playlist.ID, "534070410");
     database.playlist_add(&playlist, &content).await.unwrap();
     database.checkpoint().await.unwrap();
   }
