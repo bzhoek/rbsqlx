@@ -1,8 +1,9 @@
 #![allow(non_snake_case)]
 use dotenvy::dotenv;
-use sqlx::sqlite::{SqlitePoolOptions, SqliteQueryResult};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteQueryResult};
 use sqlx::{Error, Row, SqliteConnection, SqlitePool};
 use std::env;
+use std::str::FromStr;
 use std::time::Duration;
 use sqlx::types::chrono::Utc;
 use tracing::{debug, warn};
@@ -39,20 +40,19 @@ impl Database {
   pub async fn connect(url: &str) -> anyhow::Result<Self> {
     dotenv().ok();
 
+    let cipher_key = env::var("SQLCIPHER_KEY").expect("SQLCIPHER_KEY must be set");
+    let quoted_key = format!("'{}'", cipher_key);
+    let options = SqliteConnectOptions::from_str(url)?
+      .pragma("key", quoted_key)
+      .pragma("cipher_compatibility", "4")
+      .journal_mode(SqliteJournalMode::Wal)
+      .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+      .busy_timeout(Duration::from_secs(10));
+
     let pool: SqlitePool = SqlitePoolOptions::new()
       .max_connections(6)
       .acquire_slow_threshold(Duration::from_secs(24))
-      .after_connect(|conn, _meta| {
-        let pragma = format!("PRAGMA key = '{}';", env::var("SQLCIPHER_KEY") // key must be SQL 'quoted'
-          .expect("SQLCIPHER_KEY must be set"));
-        Box::pin(async move {
-          sqlx::query(&pragma)
-            .execute(conn)
-            .await?;
-          Ok(())
-        })
-      })
-      .connect(url)
+      .connect_with(options)
       .await?;
 
     Ok(Self { pool })
