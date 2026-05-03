@@ -76,11 +76,11 @@ impl Database {
       .fetch_one(&self.pool).await
   }
 
-  pub async fn playlist(&self, name: &str, parent: &Playlist) -> Result<Playlist, Error> {
+  pub async fn playlist(&self, name: &str, parent: &Playlist) -> Result<Option<Playlist>, Error> {
     sqlx::query_as::<_, Playlist>("SELECT * FROM djmdPlaylist WHERE Name = ? AND ParentID = ?")
       .bind(name)
       .bind(&parent.ID)
-      .fetch_one(&self.pool).await
+      .fetch_optional(&self.pool).await
   }
 
   pub async fn content_tags(&self, content: &Content) -> Result<Vec<Tag>, Error> {
@@ -184,7 +184,7 @@ impl Database {
     Ok(None)
   }
 
-  async fn playlist_content_exists(&self, playlist: &Playlist, content: &Content) -> Result<bool, Error> {
+  pub async fn playlist_content_exists(&self, playlist: &Playlist, content: &Content) -> Result<bool, Error> {
     let exists = r#"
       SELECT EXISTS (
         SELECT * FROM djmdSongPlaylist AS spl WHERE spl.PlaylistID = ? AND spl.ContentID = ?)
@@ -290,10 +290,10 @@ impl Database {
     Ok(())
   }
 
-  pub async fn playlist_add(&self, playlist: &Playlist, content: &Content) -> anyhow::Result<()> {
-    if !self.playlist_content_exists(playlist, content).await? {
-      warn!("Playlist has '{}'", content.ID);
-      return Ok(());
+  pub async fn playlist_add(&self, playlist: &Playlist, content: &Content) -> anyhow::Result<Option<String>> {
+    if self.playlist_content_exists(playlist, content).await? {
+      warn!("Playlist '{}' has '{}'", playlist.ID, content.ID);
+      return Ok(None);
     }
     
     let mut tx = self.pool.begin().await?;
@@ -307,10 +307,11 @@ impl Database {
         AND pl.ID = ?
         AND NOT EXISTS(SELECT ContentID FROM djmdSongPlaylist WHERE PlaylistID = pl.ID AND ContentID = c.ID)
       ORDER BY c.rating desc, c.created_at DESC
+      RETURNING ID
       "#;
     let next_usn = self.next_usn_tx(&mut *tx).await?;
     let timestamp = Self::now_timestamp();
-    sqlx::query(sql)
+    let row: (String,) = sqlx::query_as(sql)
       .bind(Uuid::new_v4().to_string())
       .bind(Uuid::new_v4().to_string())
       .bind(&timestamp)
@@ -318,9 +319,10 @@ impl Database {
       .bind(next_usn)
       .bind(&content.ID)
       .bind(&playlist.ID)
-      .execute(&mut *tx).await?;
+      .fetch_one(&mut *tx)
+      .await?;
     tx.commit().await?;
-    Ok(())
+    Ok(Some(row.0))
   }
 }
 
@@ -333,7 +335,7 @@ mod tests {
     let (database, content) = database_content().await;
     let parent = database.playlist_top("recent").await.unwrap();
     assert_eq!(parent.ID, "3564193569");
-    let playlist = database.playlist("recent-2404", &parent).await.unwrap();
+    let playlist = database.playlist("recent-2404", &parent).await.unwrap().unwrap();
     assert_eq!(playlist.ID, "2334865703");
     database.playlist_add(&playlist, &content).await.unwrap();
     database.checkpoint().await.unwrap();
