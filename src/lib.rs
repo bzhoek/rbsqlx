@@ -1,11 +1,11 @@
 #![allow(non_snake_case)]
 use dotenvy::dotenv;
 use sqlx::sqlite::{SqlitePoolOptions, SqliteQueryResult};
-use sqlx::{Error, Row, SqlitePool};
+use sqlx::{Error, Row, SqliteConnection, SqlitePool};
 use std::env;
 use std::time::Duration;
 use sqlx::types::chrono::Utc;
-use tracing::debug;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 #[derive(Debug, sqlx::FromRow)]
@@ -41,7 +41,7 @@ impl Database {
 
     let pool: SqlitePool = SqlitePoolOptions::new()
       .max_connections(6)
-      .acquire_slow_threshold(Duration::from_secs(12))
+      .acquire_slow_threshold(Duration::from_secs(24))
       .after_connect(|conn, _meta| {
         let pragma = format!("PRAGMA key = '{}';", env::var("SQLCIPHER_KEY") // key must be SQL 'quoted'
           .expect("SQLCIPHER_KEY must be set"));
@@ -112,16 +112,33 @@ impl Database {
     usn.try_get("int_1")
   }
 
-  async fn next_id(&self, table: &str) -> anyhow::Result<u32> {
+  async fn next_usn_tx<'a, E>(&self, executor: E) -> anyhow::Result<i64>
+  where
+    E: sqlx::Executor<'a, Database=sqlx::Sqlite>,
+  {
+    let sql = r#"
+      UPDATE agentRegistry
+      SET int_1 = int_1 + 1
+      WHERE registry_id = 'localUpdateCount'
+      RETURNING int_1;
+    "#;
+    let row: (i64,) = sqlx::query_as(sql)
+      .fetch_one(executor)
+      .await?;
+    Ok(row.0)
+  }
+
+  async fn next_id_tx(&self, table: &str, conn: &mut SqliteConnection) -> anyhow::Result<u32> {
     let sql = format!("SELECT COUNT(*) FROM {} WHERE ID = ?", table);
     let mut buf = [0u8; 4];
+
     loop {
       getrandom::getrandom(&mut buf).unwrap();
       let id: u32 = ((buf[0] as u32) << 24) + ((buf[1] as u32) << 16) + ((buf[2] as u32) << 8) + buf[3] as u32;
       if id < 100 { continue; }
       let (count, ): (i32,) = sqlx::query_as(&sql)
         .bind(id)
-        .fetch_one(&self.pool).await?;
+        .fetch_one(&mut *conn).await?;
       if count == 0 {
         return Ok(id);
       }
@@ -165,6 +182,17 @@ impl Database {
       return Ok(Some(next_usn));
     }
     Ok(None)
+  }
+
+  async fn playlist_content_exists(&self, playlist: &Playlist, content: &Content) -> Result<bool, Error> {
+    let exists = r#"
+      SELECT EXISTS (
+        SELECT * FROM djmdSongPlaylist AS spl WHERE spl.PlaylistID = ? AND spl.ContentID = ?)
+  "#;
+    sqlx::query_scalar(exists)
+      .bind(&playlist.ID)
+      .bind(&content.ID)
+      .fetch_one(&self.pool).await
   }
 
   async fn tag_exists(&self, content: &Content, tag: &str) -> Result<bool, Error> {
@@ -228,8 +256,8 @@ impl Database {
     
     let mut tx = self.pool.begin().await?;
 
-    let next_id = self.next_id("djmdPlaylist").await?;
-    let next_usn = self.next_usn().await?;
+    let next_id = self.next_id_tx("djmdPlaylist", &mut tx).await?;
+    let next_usn = self.next_usn_tx(&mut *tx).await?;
     let timestamp = Self::now_timestamp();
     let uuid = Uuid::new_v4().to_string();
 
@@ -263,6 +291,12 @@ impl Database {
   }
 
   pub async fn playlist_add(&self, playlist: &Playlist, content: &Content) -> anyhow::Result<()> {
+    if !self.playlist_content_exists(playlist, content).await? {
+      warn!("Playlist has '{}'", content.ID);
+      return Ok(());
+    }
+    
+    let mut tx = self.pool.begin().await?;
     let sql = r#"
       INSERT INTO djmdSongPlaylist (ID, PlaylistID, ContentID, UUID, created_at, updated_at, rb_local_usn, TrackNo)
       SELECT ?, pl.ID, c.ID, ?, ?, ?, ?,
@@ -274,7 +308,7 @@ impl Database {
         AND NOT EXISTS(SELECT ContentID FROM djmdSongPlaylist WHERE PlaylistID = pl.ID AND ContentID = c.ID)
       ORDER BY c.rating desc, c.created_at DESC
       "#;
-    let next_usn = self.next_usn().await?;
+    let next_usn = self.next_usn_tx(&mut *tx).await?;
     let timestamp = Self::now_timestamp();
     sqlx::query(sql)
       .bind(Uuid::new_v4().to_string())
@@ -284,7 +318,8 @@ impl Database {
       .bind(next_usn)
       .bind(&content.ID)
       .bind(&playlist.ID)
-      .execute(&self.pool).await?;
+      .execute(&mut *tx).await?;
+    tx.commit().await?;
     Ok(())
   }
 }
