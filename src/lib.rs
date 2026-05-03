@@ -250,7 +250,7 @@ impl Database {
   }
 
   pub async fn playlist_create(&self, name: &str, parent: &Playlist) -> anyhow::Result<Playlist> {
-    if let Ok(playlist) = self.playlist(name, parent).await {
+    if let Ok(Some(playlist)) = self.playlist(name, parent).await {
       return Ok(playlist);
     }
     
@@ -291,11 +291,6 @@ impl Database {
   }
 
   pub async fn playlist_add(&self, playlist: &Playlist, content: &Content) -> anyhow::Result<Option<String>> {
-    if self.playlist_content_exists(playlist, content).await? {
-      warn!("Playlist '{}' has '{}'", playlist.ID, content.ID);
-      return Ok(None);
-    }
-    
     let mut tx = self.pool.begin().await?;
     let sql = r#"
       INSERT INTO djmdSongPlaylist (ID, PlaylistID, ContentID, UUID, created_at, updated_at, rb_local_usn, TrackNo)
@@ -311,7 +306,7 @@ impl Database {
       "#;
     let next_usn = self.next_usn_tx(&mut *tx).await?;
     let timestamp = Self::now_timestamp();
-    let row: (String,) = sqlx::query_as(sql)
+    let row = sqlx::query_scalar(sql)
       .bind(Uuid::new_v4().to_string())
       .bind(Uuid::new_v4().to_string())
       .bind(&timestamp)
@@ -319,10 +314,10 @@ impl Database {
       .bind(next_usn)
       .bind(&content.ID)
       .bind(&playlist.ID)
-      .fetch_one(&mut *tx)
+      .fetch_optional(&mut *tx)
       .await?;
     tx.commit().await?;
-    Ok(Some(row.0))
+    Ok(row)
   }
 }
 
