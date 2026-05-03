@@ -18,6 +18,13 @@ pub struct Content {
 
 #[derive(Debug, sqlx::FromRow)]
 #[allow(unused)]
+pub struct Playlist {
+  ID: String,
+  pub Name: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+#[allow(unused)]
 pub struct Tag {
   ID: String,
   pub Name: String,
@@ -60,6 +67,19 @@ impl Database {
   pub async fn content(&self, id: &str) -> Result<Content, Error> {
     sqlx::query_as::<_, Content>("SELECT * FROM djmdContent WHERE FileNameL like ?")
       .bind(format!("%[{}]%", id))
+      .fetch_one(&self.pool).await
+  }
+
+  pub async fn playlist_top(&self, name: &str) -> Result<Playlist, Error> {
+    sqlx::query_as::<_, Playlist>("SELECT * FROM djmdPlaylist WHERE Name = ? AND ParentID = 'root'")
+      .bind(name)
+      .fetch_one(&self.pool).await
+  }
+
+  pub async fn playlist_sub(&self, name: &str, parent: &Playlist) -> Result<Playlist, Error> {
+    sqlx::query_as::<_, Playlist>("SELECT * FROM djmdPlaylist WHERE Name = ? AND ParentID = ?")
+      .bind(name)
+      .bind(&parent.ID)
       .fetch_one(&self.pool).await
   }
 
@@ -195,30 +215,44 @@ impl Database {
 }
 
 impl Database {
-  pub async fn playlist_create(&self, name: &str) -> anyhow::Result<()> {
+  
+  pub async fn playlist_create_top(&self, name: &str) -> anyhow::Result<Playlist> {
+    let root = Playlist { ID: "root".into(), Name: "root".into() };
+    self.playlist_create(name, &root).await
+  }
+
+  pub async fn playlist_create(&self, name: &str, parent: &Playlist) -> anyhow::Result<Playlist> {
     let next_id = self.next_id("djmdPlaylist").await?;
     let next_usn = self.next_usn().await?;
     let timestamp = Self::now_timestamp();
     let sql = r#"
       INSERT INTO djmdPlaylist (Seq, ID, Name, Attribute, ParentID, UUID, rb_local_usn, created_at, updated_at)
       SELECT
-        (SELECT MAX(Seq) + 1 FROM djmdPlaylist WHERE ParentID = 'root'),
-        ?, ?, 0, 'root', ?, ?, ?, ?
+        (SELECT MAX(Seq) + 1 FROM djmdPlaylist WHERE ParentID = ?),
+        ?, ?, 0, ?, ?, ?, ?, ?
       WHERE NOT EXISTS(SELECT ID FROM djmdPlaylist WHERE Name = ?);
       "#;
     sqlx::query(sql)
+      .bind(&parent.ID)
       .bind(next_id)
       .bind(name)
+      .bind(&parent.ID)
       .bind(Uuid::new_v4().to_string())
       .bind(next_usn)
       .bind(&timestamp)
       .bind(&timestamp)
       .bind(name)
       .execute(&self.pool).await?;
+    Ok(self.playlist_sub(name, parent).await?)
+  }
+
+  pub async fn playlist_top_add(&self, playlist: &str, content: &Content) -> anyhow::Result<()> {
+    let playlist = self.playlist_top(playlist).await?;
+    self.playlist_add(&playlist, content).await?;
     Ok(())
   }
 
-  pub async fn playlist_add(&self, playlist: &str, content: &Content) -> anyhow::Result<()> {
+  pub async fn playlist_add(&self, playlist: &Playlist, content: &Content) -> anyhow::Result<()> {
     let sql = r#"
       INSERT INTO djmdSongPlaylist (ID, PlaylistID, ContentID, UUID, created_at, updated_at, rb_local_usn, TrackNo)
       SELECT ?, pl.ID, c.ID, ?, ?, ?, ?,
@@ -226,7 +260,7 @@ impl Database {
           COALESCE((SELECT MAX(TrackNo) FROM djmdSongPlaylist WHERE PlaylistID = pl.ID), 0)
       FROM djmdContent AS c, djmdPlaylist AS pl
       WHERE c.ID = ?
-        AND pl.Name = ?
+        AND pl.ID = ?
         AND NOT EXISTS(SELECT ContentID FROM djmdSongPlaylist WHERE PlaylistID = pl.ID AND ContentID = c.ID)
       ORDER BY c.rating desc, c.created_at DESC
       "#;
@@ -239,7 +273,7 @@ impl Database {
       .bind(&timestamp)
       .bind(next_usn)
       .bind(&content.ID)
-      .bind(playlist)
+      .bind(&playlist.ID)
       .execute(&self.pool).await?;
     Ok(())
   }
@@ -248,6 +282,26 @@ impl Database {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn test_find_sub_playlist() {
+    let (database, content) = database_content().await;
+    let parent = database.playlist_top("recent").await.unwrap();
+    assert_eq!(parent.ID, "3564193569");
+    let playlist = database.playlist_sub("recent-2404", &parent).await.unwrap();
+    assert_eq!(playlist.ID, "2334865703");
+    database.playlist_add(&playlist, &content).await.unwrap();
+    database.checkpoint().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn test_find_playlist() {
+    let (database, content) = database_content().await;
+    let playlist = database.playlist_top("Oefenen").await.unwrap();
+    assert_eq!(playlist.ID, "2022558344");
+    database.playlist_top_add("Oefenen", &content).await.unwrap();
+    database.checkpoint().await.unwrap();
+  }
 
   async fn database_content() -> (Database, Content) {
     let database = Database::connect("encrypted.db").await.unwrap();
@@ -262,16 +316,26 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn test_playlist_create() {
+  async fn test_playlist_create_top() {
     let (database, _content) = database_content().await;
-    database.playlist_create("2026").await.unwrap();
+    database.playlist_create_top("2026").await.unwrap();
+    database.checkpoint().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn test_playlist_create_sub() {
+    let (database, content) = database_content().await;
+    let parent = database.playlist_top("recent").await.unwrap();
+    let playlist = database.playlist_create("2026-04", &parent).await.unwrap();
+    assert_eq!(playlist.ID, "2832414736");
+    database.playlist_add(&playlist, &content).await.unwrap();
     database.checkpoint().await.unwrap();
   }
 
   #[tokio::test]
   async fn test_playlist_add() {
     let (database, content) = database_content().await;
-    database.playlist_add("Oefenen", &content).await.unwrap();
+    database.playlist_top_add("Oefenen", &content).await.unwrap();
     database.checkpoint().await.unwrap();
   }
 
@@ -295,5 +359,4 @@ mod tests {
     let names = tags.iter().map(|t| t.Name.to_owned()).collect::<Vec<_>>();
     names
   }
-
 }
