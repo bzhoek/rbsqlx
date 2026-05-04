@@ -1,12 +1,12 @@
 #![allow(non_snake_case)]
 use dotenvy::dotenv;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteQueryResult};
+use sqlx::types::chrono::Utc;
 use sqlx::{Error, Row, SqliteConnection, SqlitePool};
 use std::env;
 use std::str::FromStr;
 use std::time::Duration;
-use sqlx::types::chrono::Utc;
-use tracing::{debug, warn};
+use tracing::debug;
 use uuid::Uuid;
 
 #[derive(Debug, sqlx::FromRow)]
@@ -133,7 +133,7 @@ impl Database {
     let mut buf = [0u8; 4];
 
     loop {
-      getrandom::getrandom(&mut buf).unwrap();
+      getrandom::getrandom(&mut buf).map_err(|e| anyhow::anyhow!("getrandom error: {}", e))?;
       let id: u32 = ((buf[0] as u32) << 24) + ((buf[1] as u32) << 16) + ((buf[2] as u32) << 8) + buf[3] as u32;
       if id < 100 { continue; }
       let (count, ): (i32,) = sqlx::query_as(&sql)
