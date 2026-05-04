@@ -59,25 +59,25 @@ impl Database {
   }
 
   pub async fn filepath(&self, path: &str) -> Result<Content, Error> {
-    sqlx::query_as::<_, Content>("SELECT * FROM djmdContent WHERE FolderPath like ?")
+    sqlx::query_as::<_, Content>("SELECT * FROM djmdContent WHERE FolderPath like $1")
       .bind(format!("%{}", path))
       .fetch_one(&self.pool).await
   }
 
   pub async fn content(&self, id: &str) -> Result<Content, Error> {
-    sqlx::query_as::<_, Content>("SELECT * FROM djmdContent WHERE FileNameL like ?")
+    sqlx::query_as::<_, Content>("SELECT * FROM djmdContent WHERE FileNameL like $1")
       .bind(format!("%[{}]%", id))
       .fetch_one(&self.pool).await
   }
 
   pub async fn playlist_top(&self, name: &str) -> Result<Playlist, Error> {
-    sqlx::query_as::<_, Playlist>("SELECT * FROM djmdPlaylist WHERE Name = ? AND ParentID = 'root'")
+    sqlx::query_as::<_, Playlist>("SELECT * FROM djmdPlaylist WHERE Name = $1 AND ParentID = 'root'")
       .bind(name)
       .fetch_one(&self.pool).await
   }
 
   pub async fn playlist(&self, name: &str, parent: &Playlist) -> Result<Option<Playlist>, Error> {
-    sqlx::query_as::<_, Playlist>("SELECT * FROM djmdPlaylist WHERE Name = ? AND ParentID = ?")
+    sqlx::query_as::<_, Playlist>("SELECT * FROM djmdPlaylist WHERE Name = $1 AND ParentID = $2")
       .bind(name)
       .bind(&parent.ID)
       .fetch_optional(&self.pool).await
@@ -86,7 +86,7 @@ impl Database {
   pub async fn content_tags(&self, content: &Content) -> Result<Vec<Tag>, Error> {
     let sql = r#"
       SELECT st.ID, t.name FROM djmdSongMyTag AS st, djmdMyTag as t
-      WHERE st.MyTagID = t.ID AND ContentID = ? ORDER by t.name
+      WHERE st.MyTagID = t.ID AND ContentID = $1 ORDER by t.name
     "#;
     sqlx::query_as::<_, Tag>(sql)
       .bind(content.ID.clone())
@@ -94,7 +94,7 @@ impl Database {
   }
 
   pub async fn rate_content(&self, content: &Content, rating: u8) -> Result<SqliteQueryResult, Error> {
-    sqlx::query("UPDATE djmdContent SET Rating = ? WHERE ID = ?")
+    sqlx::query("UPDATE djmdContent SET Rating = $1 WHERE ID = $2")
       .bind(rating)
       .bind(&content.ID)
       .execute(&self.pool).await
@@ -129,7 +129,7 @@ impl Database {
   }
 
   async fn next_id_tx(&self, table: &str, conn: &mut SqliteConnection) -> anyhow::Result<u32> {
-    let sql = format!("SELECT COUNT(*) FROM {} WHERE ID = ?", table);
+    let sql = format!("SELECT COUNT(*) FROM {} WHERE ID = $1", table);
     let mut buf = [0u8; 4];
 
     loop {
@@ -166,7 +166,7 @@ impl Database {
         SELECT st.ID
         FROM djmdSongMyTag AS st
         JOIN djmdMyTag AS t ON st.MyTagID = t.ID
-        WHERE st.ContentID = ?
+        WHERE st.ContentID = $1
       );
       "#;
     sqlx::query(sql)
@@ -187,7 +187,7 @@ impl Database {
   pub async fn playlist_content_exists(&self, playlist: &Playlist, content: &Content) -> Result<bool, Error> {
     let exists = r#"
       SELECT EXISTS (
-        SELECT * FROM djmdSongPlaylist AS spl WHERE spl.PlaylistID = ? AND spl.ContentID = ?)
+        SELECT * FROM djmdSongPlaylist AS spl WHERE spl.PlaylistID = $1 AND spl.ContentID = $2)
   "#;
     sqlx::query_scalar(exists)
       .bind(&playlist.ID)
@@ -199,7 +199,7 @@ impl Database {
     let exists = r#"
       SELECT EXISTS (
         SELECT * FROM djmdSongMyTag AS st, djmdMyTag as t
-        WHERE st.MyTagID = t.ID AND t.Name = ? AND ContentID = ?)
+        WHERE st.MyTagID = t.ID AND t.Name = $1 AND ContentID = $2)
   "#;
     sqlx::query_scalar(exists)
       .bind(tag)
@@ -210,9 +210,9 @@ impl Database {
   async fn insert_tag(&self, content: &Content, next_usn: i64, tag: &str) -> Result<SqliteQueryResult, Error> {
     let insert = r#"
       WITH
-        tag AS (SELECT ID, ParentID FROM djmdMyTag WHERE name = ?)
+        tag AS (SELECT ID, ParentID FROM djmdMyTag WHERE name = $1)
       INSERT INTO djmdSongMyTag (ID, MyTagID, ContentID, UUID, rb_local_usn, created_at, updated_at)
-        SELECT ?, tag.ID, ?, ?, ?, datetime(), datetime()
+        SELECT $2, tag.ID, $3, $4, $5, datetime(), datetime()
         FROM tag
   "#;
     sqlx::query(insert)
@@ -231,8 +231,8 @@ impl Database {
         SELECT st.ID
         FROM djmdSongMyTag AS st
         JOIN djmdMyTag AS t ON st.MyTagID = t.ID
-        WHERE st.ContentID = ?
-          AND t.name = ?
+        WHERE st.ContentID = $1
+          AND t.name = $2
       );
       "#;
     sqlx::query(sql)
@@ -316,12 +316,12 @@ impl Database {
     let mut tx = self.pool.begin().await?;
     let sql = r#"
       INSERT INTO djmdSongPlaylist (ID, PlaylistID, ContentID, UUID, created_at, updated_at, rb_local_usn, TrackNo)
-      SELECT ?, pl.ID, c.ID, ?, ?, ?, ?,
+      SELECT $1, pl.ID, c.ID, $2, $3, $4, $5,
         row_number() OVER (ORDER BY c.created_at) +
           COALESCE((SELECT MAX(TrackNo) FROM djmdSongPlaylist WHERE PlaylistID = pl.ID), 0)
       FROM djmdContent AS c, djmdPlaylist AS pl
-      WHERE c.ID = ?
-        AND pl.ID = ?
+      WHERE c.ID = $6
+        AND pl.ID = $7
         AND NOT EXISTS(SELECT ContentID FROM djmdSongPlaylist WHERE PlaylistID = pl.ID AND ContentID = c.ID)
       ORDER BY c.rating desc, c.created_at DESC
       RETURNING ID
