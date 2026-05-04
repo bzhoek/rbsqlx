@@ -284,6 +284,28 @@ impl Database {
     Ok(playlist)
   }
 
+  pub async fn playlist_reorder(&self, parent: &Playlist) -> anyhow::Result<()> {
+    let sql = r#"
+      WITH CTE AS (
+        SELECT
+            ID,
+            ROW_NUMBER() OVER (ORDER BY Name DESC) as new_seq
+        FROM djmdPlaylist
+        WHERE ParentID = $1
+      )
+      UPDATE djmdPlaylist 
+      SET Seq = (SELECT new_seq FROM CTE WHERE CTE.ID = djmdPlaylist.ID)
+      WHERE ParentID = $1;
+    "#;
+
+    sqlx::query(sql)
+      .bind(&parent.ID)
+      .execute(&self.pool)
+      .await?;
+
+    Ok(())
+  }
+
   pub async fn playlist_top_add(&self, playlist: &str, content: &Content) -> anyhow::Result<()> {
     let playlist = self.playlist_top(playlist).await?;
     self.playlist_add(&playlist, content).await?;
