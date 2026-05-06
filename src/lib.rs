@@ -2,7 +2,7 @@
 use dotenvy::dotenv;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteQueryResult};
 use sqlx::types::chrono::Utc;
-use sqlx::{Error, Row, SqliteConnection, SqlitePool};
+use sqlx::{Error, SqliteConnection, SqlitePool};
 use std::env;
 use std::str::FromStr;
 use std::time::Duration;
@@ -100,18 +100,6 @@ impl Database {
       .execute(&self.pool).await
   }
 
-  async fn next_usn(&self) -> Result<i64, Error> {
-    let sql = r#"
-      UPDATE agentRegistry
-      SET int_1 = int_1 + 1
-      WHERE registry_id = 'localUpdateCount'
-      RETURNING int_1;
-    "#;
-    let usn = sqlx::query(sql)
-      .fetch_one(&self.pool).await?;
-    usn.try_get("int_1")
-  }
-
   async fn next_usn_tx<'a, E>(&self, executor: E) -> anyhow::Result<i64>
   where
     E: sqlx::Executor<'a, Database=sqlx::Sqlite>,
@@ -175,10 +163,12 @@ impl Database {
   }
 
   pub async fn tag_content(&self, content: &Content, tag: &str) -> anyhow::Result<Option<i64>> {
-    if !self.tag_exists(content, tag).await? {
-      let next_usn = self.next_usn().await?;
+    let mut tx = self.pool.begin().await?;
+    if !self.tag_exists(content, tag, &mut *tx).await? {
+      let next_usn = self.next_usn_tx(&mut *tx).await?;
       debug!("{} for {:?} usn {}", tag, content, next_usn);
-      self.insert_tag(content, next_usn, tag).await?;
+      self.insert_tag(content, next_usn, tag, &mut *tx).await?;
+      tx.commit().await?;
       return Ok(Some(next_usn));
     }
     Ok(None)
@@ -195,7 +185,10 @@ impl Database {
       .fetch_one(&self.pool).await
   }
 
-  async fn tag_exists(&self, content: &Content, tag: &str) -> Result<bool, Error> {
+  async fn tag_exists<'a, E>(&self, content: &Content, tag: &str, executor: E) -> Result<bool, Error>
+  where
+    E: sqlx::Executor<'a, Database=sqlx::Sqlite>,
+  {
     let exists = r#"
       SELECT EXISTS (
         SELECT * FROM djmdSongMyTag AS st, djmdMyTag as t
@@ -204,10 +197,14 @@ impl Database {
     sqlx::query_scalar(exists)
       .bind(tag)
       .bind(&content.ID)
-      .fetch_one(&self.pool).await
+      .fetch_one(executor)
+      .await
   }
 
-  async fn insert_tag(&self, content: &Content, next_usn: i64, tag: &str) -> Result<SqliteQueryResult, Error> {
+  async fn insert_tag<'a, E>(&self, content: &Content, next_usn: i64, tag: &str, executor: E) -> Result<SqliteQueryResult, Error>
+  where
+    E: sqlx::Executor<'a, Database=sqlx::Sqlite>,
+  {
     let insert = r#"
       WITH
         tag AS (SELECT ID, ParentID FROM djmdMyTag WHERE name = $1)
@@ -221,7 +218,8 @@ impl Database {
       .bind(&content.ID)
       .bind(Uuid::new_v4().to_string())
       .bind(next_usn)
-      .execute(&self.pool).await
+      .execute(executor)
+      .await
   }
 
   pub async fn untag_content(&self, content: &Content, tag: &str) -> Result<SqliteQueryResult, Error> {
