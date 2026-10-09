@@ -77,10 +77,17 @@ impl Database {
   }
 
   pub async fn playlist(&self, name: &str, parent: &Playlist) -> Result<Option<Playlist>, Error> {
+    self.playlist_tx(name, parent, &self.pool).await
+  }
+
+  async fn playlist_tx<'a, E>(&self, name: &str, parent: &Playlist, executor: E) -> Result<Option<Playlist>, Error>
+  where
+    E: sqlx::Executor<'a, Database=sqlx::Sqlite>,
+  {
     sqlx::query_as::<_, Playlist>("SELECT * FROM djmdPlaylist WHERE Name = $1 AND ParentID = $2")
       .bind(name)
       .bind(&parent.ID)
-      .fetch_optional(&self.pool).await
+      .fetch_optional(executor).await
   }
 
   pub async fn content_tags(&self, content: &Content) -> Result<Vec<Tag>, Error> {
@@ -254,11 +261,12 @@ impl Database {
   }
 
   pub async fn playlist_create(&self, name: &str, parent: &Playlist) -> anyhow::Result<Playlist> {
-    if let Ok(Some(playlist)) = self.playlist(name, parent).await {
+    let mut tx = self.begin_immediate().await?;
+
+    // Checked inside the write lock so concurrent callers cannot both create the same playlist.
+    if let Some(playlist) = self.playlist_tx(name, parent, &mut *tx).await? {
       return Ok(playlist);
     }
-    
-    let mut tx = self.begin_immediate().await?;
 
     let next_id = self.next_id_tx("djmdPlaylist", &mut tx).await?;
     let next_usn = self.next_usn_tx(&mut *tx).await?;
