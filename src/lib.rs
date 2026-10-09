@@ -2,7 +2,7 @@
 use dotenvy::dotenv;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteQueryResult};
 use sqlx::types::chrono::Utc;
-use sqlx::{Error, SqliteConnection, SqlitePool};
+use sqlx::{Error, Sqlite, SqliteConnection, SqlitePool, Transaction};
 use std::env;
 use std::str::FromStr;
 use std::time::Duration;
@@ -133,6 +133,12 @@ impl Database {
     }
   }
 
+  // A deferred transaction that reads before writing fails with SQLITE_BUSY in WAL mode
+  // when another connection commits in between, without honoring busy_timeout.
+  async fn begin_immediate(&self) -> Result<Transaction<'static, Sqlite>, Error> {
+    self.pool.begin_with("BEGIN IMMEDIATE").await
+  }
+
   fn now_timestamp() -> String {
     let now_utc = Utc::now();
     now_utc.format("%Y-%m-%d %H:%M:%S%.3f %:z").to_string()
@@ -163,7 +169,7 @@ impl Database {
   }
 
   pub async fn tag_content(&self, content: &Content, tag: &str) -> anyhow::Result<Option<i64>> {
-    let mut tx = self.pool.begin().await?;
+    let mut tx = self.begin_immediate().await?;
     if !self.tag_exists(content, tag, &mut *tx).await? {
       let next_usn = self.next_usn_tx(&mut *tx).await?;
       debug!("{} for {:?} usn {}", tag, content, next_usn);
@@ -252,7 +258,7 @@ impl Database {
       return Ok(playlist);
     }
     
-    let mut tx = self.pool.begin().await?;
+    let mut tx = self.begin_immediate().await?;
 
     let next_id = self.next_id_tx("djmdPlaylist", &mut tx).await?;
     let next_usn = self.next_usn_tx(&mut *tx).await?;
@@ -311,7 +317,7 @@ impl Database {
   }
 
   pub async fn playlist_add(&self, playlist: &Playlist, content: &Content) -> anyhow::Result<Option<String>> {
-    let mut tx = self.pool.begin().await?;
+    let mut tx = self.begin_immediate().await?;
     let sql = r#"
       INSERT INTO djmdSongPlaylist (ID, PlaylistID, ContentID, UUID, created_at, updated_at, rb_local_usn, TrackNo)
       SELECT $1, pl.ID, c.ID, $2, $3, $4, $5,
